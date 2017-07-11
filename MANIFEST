@@ -95,6 +95,8 @@ lib/Thruk/Utils/Avail.pm
 lib/Thruk/Utils/Broadcast.pm
 lib/Thruk/Utils/Cache.pm
 lib/Thruk/Utils/CLI.pm
+lib/Thruk/Utils/CLI/Livecache.pm
+lib/Thruk/Utils/CLI/Selfcheck.pm
 lib/Thruk/Utils/CookieAuth.pm
 lib/Thruk/Utils/External.pm
 lib/Thruk/Utils/Filter.pm
@@ -965,6 +967,7 @@ plugins/plugins-available/panorama/templates/panorama.tt
 plugins/plugins-available/panorama/templates/panorama_js.tt
 plugins/plugins-available/reports2/description.txt
 plugins/plugins-available/reports2/lib/Thruk/Controller/reports2.pm
+plugins/plugins-available/reports2/lib/Thruk/Utils/CLI/Report.pm
 plugins/plugins-available/reports2/lib/Thruk/Utils/Reports.pm
 plugins/plugins-available/reports2/lib/Thruk/Utils/Reports/Render.pm
 plugins/plugins-available/reports2/preview.png

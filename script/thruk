@@ -21,7 +21,7 @@ eval 'exec perl -x $0 ${1+"$@"} ;'
 
 #! -*- perl -*-
 # vim: expandtab:ts=4:sw=4:syntax=perl
-#line 24
+#line 25
 
 ###################################################
 use strict;
@@ -32,12 +32,13 @@ our $VERSION = '2.14';
 my $branch       = '2';
 
 my $options = {
-    'verbose'  => 1,
-    'backends' => [],
-    'url'      => [],
+    'verbose'        => 1,
+    'backends'       => [],
+    'commandoptions' => [],
 };
 Getopt::Long::Configure('no_ignore_case');
 Getopt::Long::Configure('bundling');
+Getopt::Long::Configure('pass_through');
 Getopt::Long::GetOptions (
    "h|help"             => \$options->{'help'},
    "v|verbose"          => sub { $options->{'verbose'}++ },
@@ -46,27 +47,30 @@ Getopt::Long::GetOptions (
    "r|remote-url=s"     => \$options->{'remoteurl'},
      "local"            => \$options->{'local'},
    "c|credential=s"     => \$options->{'credential'},
-   "l|list-backends"    => \$options->{'listbackends'},
    "b|backend=s"        =>  $options->{'backends'},
    "A|auth=s"           => \$options->{'auth'},
-   "a|action=s"         => \$options->{'action'},
    "y|yes"              => \$options->{'yes'},
    "f|force"            => \$options->{'force'},
-   "i|all-inclusive"    => \$options->{'all_inclusive'},
-   "s|start=s"          => \$options->{'start'},
-     "end=s"            => \$options->{'end'},
-     "format=s"         => \$options->{'format'},
-     "host=s"           => \$options->{'host'},
-     "service=s"        => \$options->{'service'},
-     "width=i"          => \$options->{'width'},
-     "height=i"         => \$options->{'height'},
-   "<>"                 => sub { push @{$options->{'url'}}, "".shift },
+
+   "l|list-backends"    => \$options->{'listbackends'},
+   "a|action=s"         => \$options->{'action'},
+# TODO: check
+#   "i|all-inclusive"    => \$options->{'all_inclusive'},
+#   "s|start=s"          => \$options->{'start'},
+#     "end=s"            => \$options->{'end'},
+#     "format=s"         => \$options->{'format'},
+#     "host=s"           => \$options->{'host'},
+#     "service=s"        => \$options->{'service'},
+#     "width=i"          => \$options->{'width'},
+#     "height=i"         => \$options->{'height'},
+   "<>"                 => sub { push @{$options->{'commandoptions'}}, "".shift },
 ) or do {
     print "usage: $0 [<options>] <action>\nsee --help for detailed help.\n";
     exit 3;
 };
 if($options->{'help'}) {
     require Pod::Usage;
+    # TODO: add list of modules
     Pod::Usage::pod2usage( { -verbose => 2, -exit => 3 } );
 }
 if($options->{'version'}) {
@@ -75,7 +79,7 @@ if($options->{'version'}) {
     print "Thruk Version $VERSION".($branch ne '' ? '~'.$branch : '')."\n"; exit 0;
 }
 $options->{'verbose'} = 0 if $options->{'quiet'};
-if(!$options->{'action'} and scalar @{$options->{'url'}} == 0 and !$options->{'listbackends'}) {
+if(!$options->{'action'} and scalar @{$options->{'commandoptions'}} == 0 and !$options->{'listbackends'}) {
     print "usage: $0 [options]\nsee --help for complete help.\n";
     exit 3;
 }
@@ -94,28 +98,31 @@ thruk - Command Line Utility for Thruk Monitoring Gui
 
 =head1 SYNOPSIS
 
-  Usage: thruk [options] [url|files...]
+  Usage: thruk [globaloptions] <command> [commandoptions]
 
-  Options:
-  -h, --help                    Show this help message and exit
-  -v, --verbose                 Print verbose output
-  -V, --version                 Print version
+  Globaloptions:
+    -h, --help                    Show this help message and exit
+    -v, --verbose                 Print verbose output
+    -q, --quiet                   Print less output
+    -V, --version                 Print version
 
-  -b, --backend=<backend>       Comma seperated list of backends/sites
-                                which should be used for querys.
-  -l, --list-backends           List available backends/sites.
-  -a, --action=<action>         Perform given action. see below for a list.
+    -b, --backend=<backend>       Comma seperated list of backends/sites
+                                  which should be used for querys.
+    -A, --auth=<auth>             Set username for querys
 
-  -A, --auth=<auth>             Set username for querys
+    -c, --credential=<pw>         Credential when connecting to remote
+                                  Thruk installations specified by the
+                                  remote-url.
+    -r, --remote-url=<url>        URL to remote installation.
+        --local                   Don't try to connect fastcgi daemon first.
 
-  -c, --credential=<pw>         Credential when connecting to remote
-                                Thruk installations specified by the
-                                remote-url.
-  -r, --remote-url=<url>        URL to remote installation.
-      --local                   Don't try to connect fastcgi daemon first.
+    -y, --yes                     answer yes to all given questions.
+    -f, --force                   some actions need to be forced
 
-  -y, --yes                     answer yes to all given questions.
-  -f, --force                   some actions need to be forced
+  Compatibility options:
+    -l, --list-backends           List available backends/sites. Alias for 'backend list'.
+    -a, --action=<command>        Perform given action. see below for a list.
+
 
 =head1 DESCRIPTION
 
@@ -164,14 +171,14 @@ script has the following arguments
       - report=<nr>                 generate report
       - reportmail=<nr>             send report by mail
 
-    Logcache: ( MySQL / MongoDB )
+    Logcache: ( MySQL/MariaDB )
       - logcacheimport(=blocksize)  initial logcache import. Blocksize is in seconds. Defaults is one day. (hint: use --start=3w to import last 3weeks only)
       - logcacheupdate              update logcache
       - logcacheauthupdate          update logcache authorization information
       - logcachestats               print logcache statistics
       - logcacheclean(=days)        clean everything older than specified number of days. Default is one year.
-      - logcacheoptimize            optimize and repair logcache (mysql only)
-      - logcacheremoveunused        remove old tables from no longer used backends (mysql only)
+      - logcacheoptimize            optimize and repair logcache
+      - logcacheremoveunused        remove old tables from no longer used backends
 
     Livestatus Cache:
       - livecachestart              start lmd/shadownaemons livecache

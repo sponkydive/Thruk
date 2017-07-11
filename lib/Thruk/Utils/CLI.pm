@@ -20,6 +20,7 @@ use JSON::XS qw/encode_json decode_json/;
 use File::Slurp qw/read_file/;
 use Encode qw(encode_utf8);
 use Time::HiRes qw/gettimeofday tv_interval/;
+use Module::Load qw/load/;
 use Thruk::Utils qw//;
 use Thruk::Utils::IO qw//;
 use Thruk::Utils::Log qw/_error _info _debug _trace/;
@@ -334,6 +335,11 @@ sub _run {
         $log_timestamps = 1;
     }
 
+    # force some commands to be local
+    if($action =~ m/^(logcache|bpd|report|plugin)/mx) {
+        $self->{'opt'}->{'local'} = 1;
+    }
+
     my($result, $response);
     _debug("_run(): ".Dumper($self->{'opt'})) if $Thruk::Utils::CLI::verbose >= 2;
     unless($self->{'opt'}->{'local'}) {
@@ -349,6 +355,7 @@ sub _run {
     unless(defined $result) {
         # initialize backend pool here to safe some memory
         require Thruk::Backend::Pool;
+        # TODO: check
         if($self->{'opt'}->{'action'} and $self->{'opt'}->{'action'} =~ m/livecache/mx) {
             local $ENV{'USE_SHADOW_NAEMON'}        = 1;
             local $ENV{'THRUK_NO_CONNECTION_POOL'} = 1;
@@ -374,6 +381,7 @@ sub _run {
             ## use critic
         }
 
+        # TODO: check
         if(!$ENV{'THRUK_JOB_ID'} && $self->{'opt'}->{'action'} && $self->{'opt'}->{'action'} =~ /^report(\w*)=(.*)$/mx) {
             # create fake job
             my($id,$dir) = Thruk::Utils::External::_init_external($c);
@@ -570,12 +578,25 @@ sub _run_commands {
     # which command to run?
     my @actions = split(/\s*,\s*/mx, ($opt->{'action'} || ''));
 
-    if(scalar @actions == 0 and defined $opt->{'url'} and scalar @{$opt->{'url'}} > 0) {
-        push @actions, 'url='.$opt->{'url'}->[0];
+    # map some options to commands
+    if(scalar @actions == 0 and scalar @{$opt->{'commandoptions'}} > 0) {
+        if($opt->{'commandoptions'}->[0] =~ /^(https?:\/\/)$/mx) {
+            push @actions, 'url';
+            $opt->{'commandoptions'}->[0] = $1;
+        }
+        elsif($opt->{'commandoptions'}->[0] =~ /list(backend|host|service|hostgroup|servicegroup)s?/mx) {
+            push @actions, $1;
+            $opt->{'commandoptions'}->[0] = 'list';
+        }
+        elsif(defined $opt->{'listbackends'}) {
+            push @actions, 'backend';
+            $opt->{'commandoptions'}->[0] = 'list';
+        }
+        else {
+            push @actions, shift @{$opt->{'commandoptions'}};
+        }
     }
-    if(scalar @actions == 0 and defined $opt->{'listbackends'}) {
-        push @actions, 'listbackends';
-    }
+
     if(scalar @actions == 1) {
         return(_run_command_action($c, $opt, $src, $actions[0]));
     }
@@ -610,16 +631,19 @@ sub _run_command_action {
     }
 
     # list hosts
+    # TODO: check
     elsif($action eq 'listhosts') {
         $data->{'output'} = _cmd_listhosts($c);
     }
 
     # list services
+    # TODO: check
     elsif($action eq 'listservices') {
         $data->{'output'} = _cmd_listservices($c);
     }
 
     # list hostgroups
+    # TODO: check
     elsif($action eq 'listhostgroups') {
         $data->{'output'} = _cmd_listhostgroups($c);
     }
@@ -627,11 +651,6 @@ sub _run_command_action {
     # request url
     elsif($action =~ /^url=(.*)$/mx) {
         $data = _cmd_url($c, $1, $opt);
-    }
-
-    # report or report mails
-    elsif($action =~ /^report(\w*)=(.*)$/mx) {
-        ($data->{'output'}, $data->{'rc'}) = _cmd_report($c, $1, $2);
     }
 
     # downtime?
@@ -703,17 +722,6 @@ sub _run_command_action {
         ($data->{'output'}, $data->{'rc'}) = _cmd_import_logs($c, 'removeunused', $src, $2, $opt);
     }
 
-    # livestatus proxy cache
-    elsif($action =~ /livecache(start|stop|status|restart)/mx) {
-        ($data->{'output'}, $data->{'rc'}) = _cmd_livecache($c, $1, $src);
-    }
-
-    # self check
-    elsif($action eq 'selfcheck' or $action =~ /^selfcheck=(.*)$/mx) {
-        ($data->{'output'}, $data->{'rc'}) = _cmd_selfcheck($c, $1);
-        $data->{'all_stdout'} = 1;
-    }
-
     # core reschedule?
     elsif($action =~ /^fix_scheduling=?(.*)$/mx) {
         ($data->{'output'}, $data->{'rc'}) = _cmd_fix_scheduling($c, $1);
@@ -724,10 +732,42 @@ sub _run_command_action {
         ($data->{'output'}, $data->{'rc'}) = _cmd_graph($c, $opt);
     }
 
-    # nothing matched...
     else {
-        $data->{'output'} = "FAILED - no such command: ".$action.". Run with --help to see a list of commands.\n";
-        $data->{'rc'}     = 1;
+        # generic sub commands
+
+        # compatibility mode for old style commands
+        if($action =~ m/^(selfcheck|report|livecache)(\w*)
+                         =?(.*)$/gmx) {
+            $action = $1;
+            unshift @{$opt->{'commandoptions'}}, $3 if $3;
+            unshift @{$opt->{'commandoptions'}}, $2 if $2;
+        }
+
+        # load sub command module
+        my $mod = ucfirst($action);
+        eval {
+            load "Thruk::Utils::CLI::$mod";
+        };
+        if($@) {
+            _debug($@) if $Thruk::Utils::CLI::verbose >= 1;
+            $data->{'output'} = "FAILED - no such command: ".$action.". Run with --help to see a list of commands.\n";
+            $data->{'rc'}     = 1;
+            return $data;
+        }
+
+        # print help only?
+        if(scalar @{$opt->{'commandoptions'}} > 0 && $opt->{'commandoptions'}->[0] =~ /^(help|\-h)$/mx) {
+            return(get_submodule_help($mod));
+        }
+
+        # run command
+        my $f = \&{"Thruk::Utils::CLI::".$mod."::cmd"};
+        my @res = &{$f}($c, $action, $opt->{'commandoptions'}, $data, $src, $opt);
+        if(scalar @res == 1 && ref $res[0] eq 'HASH') {
+            $data = $res[0];
+        } else {
+            ($data->{'output'}, $data->{'rc'}) = @res;
+        }
     }
 
     $c->stats->profile(end => "_run_command_action($action)");
@@ -737,6 +777,41 @@ sub _run_command_action {
         `touch $ENV{'THRUK_JOB_DIR'}/stdout`;
     }
 
+    return $data;
+}
+
+##############################################
+
+=head2 get_submodule_help
+
+    get_submodule_help($module, [$data])
+
+returns help extracted from pod for given module
+
+=cut
+sub get_submodule_help {
+    my($module, $data) = @_;
+
+    $data = {} unless $data;
+    require Pod::Usage;
+    my $file = "Thruk::Utils::CLI::".$module.".pm";
+    if($module =~ m/::/gmx) {
+        $file = $module.'.pm';
+    }
+    $file =~ s/::/\//gmx;
+    my $output = "";
+    open my $fh, ">", \$output or die $!;
+    Pod::Usage::pod2usage({
+            -verbose    => 99,
+            -sections   => "DESCRIPTION|SYNOPSIS|OPTIONS|EXAMPLES",
+            -noperldoc  => 1,
+            -input      => $INC{$file},
+            -output     => $fh,
+            -exitval    => 'NOEXIT',
+        });
+    CORE::close($fh);
+    $data->{'output'} = $output;
+    $data->{'rc'}     = 3;
     return $data;
 }
 
@@ -893,49 +968,6 @@ sub _cmd_command {
 
     $c->stats->profile(end => "_cmd_command()");
     return $msg;
-}
-
-##############################################
-sub _cmd_report {
-    my($c, $mail, $nr) = @_;
-
-    $c->stats->profile(begin => "_cmd_report()");
-
-    my $output;
-    eval {
-        require Thruk::Utils::Reports;
-    };
-    if($@) {
-        return("reports plugin is not enabled.\n", 1);
-    }
-    my $logfile = $c->config->{'var_path'}.'/reports/'.$nr.'.log';
-    # set waiting flag for queued reports, so the show up nicely in the gui
-    Thruk::Utils::Reports::process_queue_file($c);
-    if($mail eq 'mail') {
-        if(Thruk::Utils::Reports::queue_report_if_busy($c, $nr, 1)) {
-            $output = "report queued successfully\n";
-        }
-        elsif(Thruk::Utils::Reports::report_send($c, $nr)) {
-            $output = "mail send successfully\n";
-        } else {
-            return("cannot send mail\n", 1)
-        }
-    } else {
-        if(Thruk::Utils::Reports::queue_report_if_busy($c, $nr)) {
-            $output = "report queued successfully\n";
-        } else {
-            my $report_file = Thruk::Utils::Reports::generate_report($c, $nr);
-            if(defined $report_file and -f $report_file) {
-                $output = read_file($report_file);
-            } else {
-                my $errors = read_file($logfile);
-                return("generating report failed:\n".$errors, 1);
-            }
-        }
-    }
-
-    $c->stats->profile(end => "_cmd_report()");
-    return($output, 0);
 }
 
 ##############################################
@@ -1403,83 +1435,6 @@ sub _cmd_import_logs {
     }
 }
 
-##############################################
-sub _cmd_livecache {
-    my($c, $mode, $src) = @_;
-    $c->stats->profile(begin => "_cmd_livecache($mode)");
-
-    if($src ne 'local' and $mode ne 'status') {
-        return("ERROR - please run with --local only\n", 1);
-    }
-
-    Thruk::Backend::Pool::init_backend_thread_pool();
-
-    if($mode eq 'start') {
-        Thruk::Utils::Livecache::check_procs($c->config, $c, 0, 1);
-        # wait for the startup
-        my($status, $started);
-        for(my $x = 0; $x <= 20; $x++) {
-            eval {
-                ($status, $started) = Thruk::Utils::Livecache::status($c->config);
-            };
-            last if($status && scalar @{$status} == $started);
-            sleep(1);
-        }
-        return("OK - livecache started\n", 0) if(defined $started and $started > 0);
-        return("FAILED - starting livecache failed\n", 1);
-    }
-    elsif($mode eq 'stop') {
-        Thruk::Utils::Livecache::shutdown($c->config);
-        # wait for the fully stopped
-        my($status, $started, $total, $failed);
-        for(my $x = 0; $x <= 20; $x++) {
-            eval {
-                ($status, $started) = Thruk::Utils::Livecache::status($c->config);
-                if($c->config->{'use_lmd_core'}) {
-                    if(scalar @{$status} == 1 && $status->[0]->{'status'} == 0) {
-                        $total = 1;
-                        $failed = 1;
-                    }
-                } else {
-                    ($total, $failed) = _get_shadownaemon_totals($c, $status);
-                }
-            };
-            last if(defined $started && $started == 0 && defined $total && $total == $failed);
-            sleep(1);
-        }
-    }
-    elsif($mode eq 'restart') {
-        Thruk::Utils::Livecache::restart($c, $c->config);
-        # wait for the startup
-        my($status, $started);
-        for(my $x = 0; $x <= 20; $x++) {
-            eval {
-                ($status, $started) = Thruk::Utils::Livecache::status($c->config);
-            };
-            last if($status && scalar @{$status} == $started);
-            sleep(1);
-        }
-    }
-
-    my($status, $started) = Thruk::Utils::Livecache::status($c->config);
-    $c->stats->profile(end => "_cmd_livecache($mode)");
-    if(scalar @{$status} == 0) {
-        return("UNKNOWN - livecache not enabled for any backend\n", 3);
-    }
-    if(scalar @{$status} == $started) {
-        if($c->config->{'use_lmd_core'}) {
-            return("OK - livecache running with pid ".$status->[0]->{'pid'}."\n", 0);
-        } else {
-            my($total, $failed) = _get_shadownaemon_totals($c, $status);
-            return("OK - $started/$started livecache running, ".($total-$failed)."/".$total." online\n", 0);
-        }
-    }
-    if($started == 0) {
-        return("STOPPED - $started livecache running\n", $mode eq 'stop' ? 0 : 2);
-    }
-    return("WARNING - $started/".(scalar @{$status})." livecache running\n", 1);
-}
-
 ##########################################################
 sub _get_shadownaemon_totals {
     my($c, $status) = @_;
@@ -1719,19 +1674,6 @@ sub _cmd_ext_job {
         };
     }
     return([undef, 1, $res, $last_error], 0);
-}
-
-##############################################
-sub _cmd_selfcheck {
-    my($c, $type) = @_;
-    $c->stats->profile(begin => "_cmd_selfcheck()");
-    $type = 'all' unless $type;
-
-    require Thruk::Utils::SelfCheck;
-    my($rc, $msg, $details) = Thruk::Utils::SelfCheck->self_check($c, $type);
-
-    $c->stats->profile(end => "_cmd_selfcheck()");
-    return($msg."\n".$details."\n", $rc);
 }
 
 ##############################################
